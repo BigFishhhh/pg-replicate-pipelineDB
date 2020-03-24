@@ -1,0 +1,231 @@
+#!/usr/bin/env python
+# coding=utf-8
+import os
+import sys
+import psycopg2
+import psycopg2.extras
+import json
+import records
+from psycopg2._psycopg import OperationalError
+
+from util import log
+import replicate_pipelinedb
+
+
+class PgReplicatePipelineDB(object):
+    """ Main entry class """
+
+    def __init__(self, args):
+        super(PgReplicatePipelineDB, self).__init__()
+        self.args = args
+        self.origin_args = args
+        self.config = None
+    def _pipelinedb_consumer(self, msg):
+        try:
+            if self.config['plugin'] == 'decoderbufs':
+                from google.protobuf.json_format import MessageToJson,MessageToDict, Parse
+                from msg_pb2 import RowMessage
+                rm = RowMessage()
+                rm.ParseFromString(msg.payload)
+                payload = MessageToDict(rm)
+            else:
+                payload = json.loads(msg.payload)
+            self.pipeline.replicate(payload)
+
+        except Exception as e:
+            log.error('_pipelinedb_consumer error, error info is %s' % e)
+
+        msg.cursor.send_feedback(flush_lsn=msg.data_start)
+
+    def _validate_args(self):
+        if len(self.args) == 0 or len(self.args) >= 2:
+            log.info('Usage --config=<absolute path to config>')
+            self.args = './pg2pipelinedb'
+            return True
+        else:
+            self.args = self.args[0]
+
+        if '--config=' not in self.args:
+            log.info('Usage --config=<absolute path to config>')
+            return False
+        else:
+            self.args = self.args.split('=')[1]
+            return True
+
+    def _validate_config(self):
+        valid_keys = [
+            u'replication_slot',
+            u'postgres',
+            u'pipelinedb',
+            u'inital_sync',
+            u'tables'
+        ]
+
+        replication_slot_valid_keys = [
+            u'name',
+            u'is_temp'
+        ]
+
+        postgres_valid_keys = [
+            u'database',
+            u'host',
+            u'username',
+            u'password',
+            u'port'
+        ]
+
+        tables_valid_keys = [
+            u'name',
+            u'uprimary_key'
+        ]
+
+        if self.config.keys().sort() != valid_keys.sort():
+            log.info('Invalid configuration')
+            return False
+
+        if self.config['replication_slot'].keys().sort() != replication_slot_valid_keys.sort():
+            log.info('Invalid replication slot configuration')
+            return False
+
+        for table in self.config['tables']:
+            if table.keys().sort() != tables_valid_keys.sort():
+                log.info('Each table in tables configuration must have name and primary_key')
+                return False
+        return True
+
+    def _load_config(self):
+
+        if os.path.exists(self.args + '.yaml'):
+            self.args = self.args + '.yaml'
+        elif os.path.exists(self.args + '.json'):
+            self.args = self.args + '.json'
+        elif os.path.exists(self.args):
+            pass
+        else:
+            log.info('Invalid file: %s' % self.args)
+            return False
+
+        with open(self.args, 'r') as f:
+            if self.args.endswith('json'):
+                log.info('configuration file is json')
+                self.config = json.load(f)
+            else:
+                import yaml
+                log.info('configuration file is yaml')
+                self.config = yaml.load(f)
+            print self.config
+
+        if self._validate_config():
+            return True
+
+        log.info('>>> Init failed!')
+
+    def run(self):
+        if not self._validate_args():
+            log.info('Invalid arguments')
+            return
+
+        try:
+            self._load_config()
+        except Exception as e:
+            log.info(e)
+            log.info('Configuration file does not exist!')
+            return
+
+        if not self._validate_config():
+            log.info('Invalid configuration file format')
+            return
+
+        psycopg2_connection_string = 'dbname=%s host=%s user=%s password=%s port=%s' % (
+            self.config['postgres']['database'],
+            self.config['postgres']['host'],
+            self.config['postgres']['username'],
+            self.config['postgres']['password'],
+            self.config['postgres']['port'],
+        )
+
+        psycopg2_connection_pipelinedb_string = 'dbname=%s host=%s user=%s password=%s port=%s' % (
+            self.config['pipelinedb']['database'],
+            self.config['pipelinedb']['host'],
+            self.config['pipelinedb']['username'],
+            self.config['pipelinedb']['password'],
+            self.config['postgres']['port'],
+        )
+
+
+
+        conn = psycopg2.connect(
+            psycopg2_connection_string,
+            connection_factory=psycopg2.extras.LogicalReplicationConnection
+        )
+
+        inital_sync = self.config['inital_sync']
+
+        self.pipeline = replicate_pipelinedb.PipelinedbRepliaction(
+            self.config['tables'],
+            self.config['plugin'],
+            connection=psycopg2_connection_pipelinedb_string
+        )
+
+        cur = conn.cursor()
+
+        if inital_sync:
+            def inital_sync_table(table):
+                print('Synchronization of %s....' % table['name'])
+                connection_string = 'postgres://%s:%s/%s:%d/%s' % (
+                    self.config['postgres']['username'],
+                    self.config['postgres']['password'],
+                    self.config['postgres']['host'],
+                    self.config['postgres']['port'],
+                    self.config['postgres']['database']
+                )
+                temp_client = records.Database(connection_string)
+                rows = temp_client.query("SELECT * FROM %s" % table['name'])
+                self.pipeline.replicate(
+                    rows.all(),
+                    initial=inital_sync,
+                    initial_table=table['name']
+                )
+
+            map(inital_sync_table, self.config['tables'])
+        decode = True
+        options = None
+        if self.config['plugin'] == 'decoderbufs':
+            decode = False
+        else:
+            tables = ','.join(['*.' + item['name'] for item in self.config['tables']])
+            options = {'add-tables': tables}
+        try:
+            # cur.start_replication(slot_name=self.config['replication_slot']['name'], decode=decode,options={'add-tables': 'test_size'})
+            cur.start_replication(slot_name=self.config['replication_slot']['name'], options=options, decode=decode)
+        except psycopg2.ProgrammingError as e:
+            print e
+            if self.config['replication_slot']['is_temp']:
+                slot_sql = "SELECT * FROM pg_create_logical_replication_slot('%s', self.config['plugin'], TRUE);" % self.config['replication_slot']['name']
+                cur.execute(slot_sql)
+                conn.commit()
+            else:
+                cur.create_replication_slot(self.config['replication_slot']['name'], output_plugin=self.config['plugin'])
+            cur.start_replication(slot_name=self.config['replication_slot']['name'], options=options, decode=decode)
+
+        log.info('Starting streaming, plugin is %s ,press Control-C to end...' % self.config['plugin'])
+        try:
+            cur.consume_stream(self._pipelinedb_consumer)
+        except KeyboardInterrupt:
+            cur.close()
+            conn.close()
+            if not self.config['replication_slot']['is_temp']:
+                log.info("\nWARNING: Transaction logs will accumulate in pg_xlog until the slot is dropped."
+                      "\nThe slot 'PipelineDB_slot' still exists. Drop it with "
+                      "SELECT pg_drop_replication_slot('%s'); if no longer needed." % self.config['replication_slot']['name'],
+                      )
+        except OperationalError as e:
+            log.error('PgReplicatePipelineDB run error , error info is %s' % e)
+            PgReplicatePipelineDB(self.origin_args).run()
+
+
+
+if __name__ == "__main__":
+    arguments = sys.argv[1:]
+    PgReplicatePipelineDB(arguments).run()
+

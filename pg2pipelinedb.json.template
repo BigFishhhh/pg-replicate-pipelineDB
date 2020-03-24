@@ -1,0 +1,64 @@
+{
+	"plugin":"wal2json",
+	"replication_slot": {
+		"name": "pipelinedb_slot",
+		"is_temp": false
+	},
+	"tables": [
+		{
+		"name": "nt_sale_order",
+		"primary_key": "id",
+		"exclude_columns": "",
+		"include_columns": "name,state",
+		"filters":[
+			{
+				"columns": "state",
+				"before": "process",
+				"after": "done"
+			}
+		]
+	}, {
+		"name": "nt_sale_order_line",
+		"primary_key": "id",
+		"exclude_columns": "",
+		"include_columns": "order_id,order_state",
+		"filters":[
+			{
+				"columns": "order_state",
+				"before": "process",
+				"after": "done"
+			}
+		]
+	},
+	{
+		"name": "nt_salesman_performance",
+		"primary_key": "id",
+		"exclude_columns": "",
+		"include_columns": "salesman_id"
+
+	},
+		{
+		"name": "test_size",
+		"primary_key": "id",
+		"exclude_columns": "",
+		"include_columns": "size"
+
+	}
+	],
+	"pipelinedb": {
+		"port": 5432,
+		"host": "127.0.0.1",
+		"database": "",
+		"username": "",
+		"password": ""
+	},
+	"postgres": {
+		"port": 5432,
+		"host": "127.0.0.1",
+		"database": "",
+		"username": "",
+		"password": ""
+	},
+	"inital_sync": false,
+}
+

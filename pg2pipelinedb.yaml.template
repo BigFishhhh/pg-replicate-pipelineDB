@@ -1,0 +1,43 @@
+---
+plugin: wal2json #流复制插件，目前支持wal2json和decoderbufs
+replication_slot: # 逻辑复制槽
+  name: pipelinedb_slot
+  is_temp: false # 保留字段
+tables: # 数据库表信息
+- name: sale_order # 表名
+  primary_key: id # 表明对应的主键
+  exclude_columns: # 不包含的字段
+  include_columns: name,state #包含的字段
+  filters: # 过滤条件
+  - columns: state # 过滤条件的字段
+    before: process # 字段之前的值
+    after: done # 字段之后的值
+- name: sale_order_line
+  primary_key: id
+  exclude_columns:
+  include_columns: order_id,order_state
+  filters:
+  - columns: order_state
+    before: process
+    after: done
+- name: salesman_performance
+  primary_key: id
+  exclude_columns:
+  include_columns: salesman_id
+- name: test_size
+  primary_key: id
+  exclude_columns:
+  include_columns: size
+pipelinedb: # pipelinedb链接信息
+  port: 5432
+  host: 127.0.0.1
+  database:
+  username:
+  password:
+postgres: # postgres链接信息
+  port: 5432
+  host: 127.0.0.1
+  database:
+  username:
+  password:
+inital_sync: false # 保留字段
