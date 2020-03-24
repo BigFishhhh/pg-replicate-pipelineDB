@@ -115,5 +115,6 @@ Example configuration
 ### Note
 
 wal2json is not my software so for licence check [their licence](https://raw.githubusercontent.com/hmilkovi/wal2json/master/LICENSE)
+
 decoderbufs is not my software so for licence check [their licence](https://github.com/debezium/postgres-decoderbufs/blob/master/LICENSE)
 
